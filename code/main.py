@@ -10,6 +10,11 @@ class ColorConverterApp(tk.Tk):
 
         self.updating = False  # Флаг для предотвращения рекурсивных обновлений
 
+        # Костыль
+        self.set_by_cmyk = False
+        self.set_by_hsv = False
+        self.set_by_rgb = False
+
         # Переменные для хранения значений
         self.cmyk_vars = [tk.DoubleVar() for _ in range(4)]
         self.rgb_vars = [tk.IntVar() for _ in range(3)]
@@ -88,35 +93,70 @@ class ColorConverterApp(tk.Tk):
         r, g, b = [v.get() for v in self.rgb_vars]
         self.update_color_display(r, g, b)
 
+        r_ = r / 255.0
+        g_ = g / 255.0
+        b_ = b / 255.0
+
         # RGB -> HSV
-        h, s, v = colorsys.rgb_to_hsv(r/255.0, g/255.0, b/255.0)
-        self.hsv_vars[0].set(round(h * 360))
-        self.hsv_vars[1].set(round(s * 100))
-        self.hsv_vars[2].set(round(v * 100))
+        if not self.set_by_hsv:
+            cmax = max(r_, g_, b_)
+            cmin = min(r_, g_, b_)
+            delta = cmax - cmin
+
+            if delta < 1e-4:
+                h = 0
+            elif cmax == r_:
+                h = (60 * ((g_ - b_) / delta)) % 360
+            elif cmax == g_:
+                h = 60 * (((b_ - r_) / delta) + 2)
+            else:
+                h = 60 * (((r_ - g_) / delta) + 4)
+
+            if cmax < 1e-4:
+                s = 0
+            else:
+                s = delta / cmax
+
+            v = cmax
+
+            self.hsv_vars[0].set(round(h))
+            self.hsv_vars[1].set(round(s * 100))
+            self.hsv_vars[2].set(round(v * 100))
 
         # RGB -> CMYK
-        if (r, g, b) == (0, 0, 0):
-            c, m, y, k = 0, 0, 0, 100
-        else:
+        if not self.set_by_cmyk:
+            if max(r, g, b) < 1e-4:
+                r, g, b = 0.001, 0.001, 0.001
+
             r_ = r / 255.0
             g_ = g / 255.0
             b_ = b / 255.0
-            k_val = 1 - max(r_, g_, b_)
+
+            k_val = min(1 - r_, 1 - g_, 1 - b_)
             c = (1 - r_ - k_val) / (1 - k_val)
             m = (1 - g_ - k_val) / (1 - k_val)
             y = (1 - b_ - k_val) / (1 - k_val)
             c, m, y, k = round(c*100), round(m*100), round(y*100), round(k_val*100)
 
-        self.cmyk_vars[0].set(c)
-        self.cmyk_vars[1].set(m)
-        self.cmyk_vars[2].set(y)
-        self.cmyk_vars[3].set(k)
+            self.cmyk_vars[0].set(c)
+            self.cmyk_vars[1].set(m)
+            self.cmyk_vars[2].set(y)
+            self.cmyk_vars[3].set(k)
         
         self.updating = False
+        self.set_by_cmyk = False
+        self.set_by_hsv = False
 
     def update_from_cmyk(self):
         self.updating = True
+        self.set_by_cmyk = True
+
         c, m, y, k = [v.get() for v in self.cmyk_vars]
+
+        self.cmyk_vars[0].set(round(c))
+        self.cmyk_vars[1].set(round(m))
+        self.cmyk_vars[2].set(round(y))
+        self.cmyk_vars[3].set(round(k))
         
         # CMYK -> RGB
         r = 255 * (1 - c/100) * (1 - k/100)
@@ -132,13 +172,52 @@ class ColorConverterApp(tk.Tk):
 
     def update_from_hsv(self):
         self.updating = True
+        self.set_by_hsv = True
         h, s, v = [var.get() for var in self.hsv_vars]
-        
+
+        self.hsv_vars[0].set(round(h))
+        self.hsv_vars[1].set(round(s))
+        self.hsv_vars[2].set(round(v))
+
         # HSV -> RGB
-        r, g, b = colorsys.hsv_to_rgb(h/360.0, s/100.0, v/100.0)
-        self.rgb_vars[0].set(round(r * 255))
-        self.rgb_vars[1].set(round(g * 255))
-        self.rgb_vars[2].set(round(b * 255))
+        h = min(h, 359) / 360.0
+        s = s / 100.0
+        v = v / 100.0
+
+        if s == 0:
+            r = g = b = v
+        else:
+            h_for_i = h * 6
+            i = int(h_for_i)
+            f = h_for_i - i
+            p = v * (1 - s)
+            q = v * (1 - f * s)
+            t = v * (1 - (1 - f) * s)
+
+            if i == 0:
+                r, g, b = v, t, p
+            elif i == 1:
+                r, g, b = q, v, p
+            elif i == 2:
+                r, g, b = p, v, t
+            elif i == 3:
+                r, g, b = p, q, v
+            elif i == 4:
+                r, g, b = t, p, v
+            else:
+                r, g, b = v, p, q
+
+        r = round(r * 255)
+        g = round(g * 255)
+        b = round(b * 255)
+
+        r = min(max(r, 0), 255)
+        g = min(max(g, 0), 255)
+        b = min(max(b, 0), 255)
+
+        self.rgb_vars[0].set(r)
+        self.rgb_vars[1].set(g)
+        self.rgb_vars[2].set(b)
         self.updating = False
 
         self.update_from_rgb() # Пересчитываем все из RGB
