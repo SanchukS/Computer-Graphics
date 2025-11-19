@@ -1,170 +1,278 @@
-import cv2
-import numpy as np
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import filedialog, ttk, messagebox
+import numpy as np
 from PIL import Image, ImageTk
 
-# Реализация алгоритмов
+# --- Алгоритмы обработки ---
 
-def _apply_padding(image, kernel_shape):
-    k_h, k_w = kernel_shape
-    pad_top = k_h // 2
-    pad_bottom = k_h - pad_top - 1
-    pad_left = k_w // 2
-    pad_right = k_w - pad_left - 1
+def apply_padding(image, pad_h, pad_w, mode, value=0):
+    # Добавляем рамку вокруг изображения для обработки краев
+    if mode == 'constant':
+        return np.pad(image, ((pad_h, pad_h), (pad_w, pad_w)), mode=mode, constant_values=value)
+    return np.pad(image, ((pad_h, pad_h), (pad_w, pad_w)), mode=mode)
+
+def convolve(image, kernel):
+    # Свертка изображения с ядром
+    h, w = kernel.shape
+    pad_h, pad_w = h // 2, w // 2
+    padded = apply_padding(image, pad_h, pad_w, 'edge')
     
-    padded_image = cv2.copyMakeBorder(image, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_REPLICATE)
-    return padded_image
-
-def manual_median_filter(image, kernel_size):
-    if len(image.shape) == 3:
-        h, w, c = image.shape
-        output_image = np.zeros_like(image)
-        for i in range(c):
-            output_image[:, :, i] = manual_median_filter(image[:, :, i], kernel_size)
-        return output_image
-
-    h, w = image.shape
-    padded_image = _apply_padding(image, (kernel_size, kernel_size))
-    output_image = np.zeros_like(image)
-
-    for y in range(h):
-        for x in range(w):
-            neighborhood = padded_image[y : y + kernel_size, x : x + kernel_size]
-            output_image[y, x] = np.median(neighborhood)
-            
-    return output_image
-
-def manual_dilate(image, kernel):
-    k_h, k_w = kernel.shape
-    padded_image = _apply_padding(image, (k_h, k_w))
-    output_image = np.zeros_like(image)
-    h, w = image.shape
+    output = np.zeros_like(image, dtype=np.float32)
+    kernel_sum = kernel.sum()
+    if kernel_sum == 0: kernel_sum = 1
     
-    for y in range(h):
-        for x in range(w):
-            neighborhood = padded_image[y : y + k_h, x : x + k_w]
-            masked_neighborhood = neighborhood[kernel != 0]
-            output_image[y, x] = np.max(masked_neighborhood)
+    # Проходим окном по всему изображению
+    rows, cols = image.shape
+    for y in range(rows):
+        for x in range(cols):
+            region = padded[y:y+h, x:x+w]
+            val = np.sum(region * kernel)
+            output[y, x] = val / kernel_sum
             
-    return output_image
+    return np.clip(output, 0, 255).astype(np.uint8)
 
-# Графический интерфейс
+def morphology(image, se, mode):
+    # Морфологические операции
+    h, w = se.shape
+    pad_h, pad_w = h // 2, w // 2
+    
+    # Для эрозии фон белый (255), для дилатации черный (0)
+    pad_val = 255 if mode == 'erosion' else 0
+    padded = apply_padding(image, pad_h, pad_w, 'constant', pad_val)
+    
+    output = np.zeros_like(image)
+    rows, cols = image.shape
+    
+    for y in range(rows):
+        for x in range(cols):
+            region = padded[y:y+h, x:x+w]
+            # Выбираем пиксели, попадающие под маску структурного элемента
+            masked = region[se == 1]
+            
+            if mode == 'erosion':
+                # Если все пиксели под маской белые -> ставим белый
+                if np.all(masked == 255): output[y, x] = 255
+            elif mode == 'dilation':
+                # Если хоть один пиксель под маской белый -> ставим белый
+                if np.any(masked == 255): output[y, x] = 255
+                
+    return output
 
-class ImageProcessorApp:
+# --- Данные для фильтров ---
+
+def get_kernels():
+    # Гаусс 7x7 (аппроксимация)
+    gaussian = np.array([
+        [1, 1, 2, 2, 2, 1, 1],
+        [1, 3, 5, 5, 5, 3, 1],
+        [2, 5, 9, 12, 9, 5, 2],
+        [2, 5, 12, 15, 12, 5, 2],
+        [2, 5, 9, 12, 9, 5, 2],
+        [1, 3, 5, 5, 5, 3, 1],
+        [1, 1, 2, 2, 2, 1, 1]
+    ])
+    return {"Однородный 7x7": np.ones((7, 7)), "Гаусс 7x7": gaussian}
+
+def get_se(shape, size):
+    if shape == "Крест":
+        se = np.zeros((size, size), dtype=np.uint8)
+        center = size // 2
+        se[center, :] = 1
+        se[:, center] = 1
+        return se
+    return np.ones((size, size), dtype=np.uint8) # Квадрат
+
+# --- Интерфейс ---
+
+class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Лабораторная работа 2")
+        self.root.title("Лабораторная работа №2")
+        self.root.geometry("1100x650")
+        self.root.minsize(800, 500)
 
-        self.original_image = None
-        self.processed_image = None
+        self.img_orig = None
+        self.img_proc = None
         
-        top_frame = ttk.Frame(root, padding=10)
-        top_frame.pack(side=tk.TOP, fill=tk.X)
+        self.setup_ui()
 
-        image_frame = ttk.Frame(root, padding=10)
-        image_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+    def setup_ui(self):
+        # Левая панель управления
+        control_frame = tk.Frame(self.root, width=250)
+        control_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+        control_frame.pack_propagate(False)
 
-        ttk.Button(top_frame, text="Загрузить изображение", command=self.load_image).pack(side=tk.LEFT, padx=5)
-        ttk.Button(top_frame, text="Настроить и применить", command=self.open_settings_dialog).pack(side=tk.LEFT, padx=5)
-
-        self.orig_label = ttk.Label(image_frame, text="Исходное изображение", relief="solid", anchor=tk.CENTER)
-        self.orig_label.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
-
-        self.proc_label = ttk.Label(image_frame, text="Преобразованное изображение", relief="solid", anchor=tk.CENTER)
-        self.proc_label.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
-
-    def load_image(self):
-        filepath = filedialog.askopenfilename(filetypes=[("Image files", "*.jpg *.jpeg *.png *.bmp *.webp")])
-        if not filepath: return
+        # Правая часть с изображениями
+        self.display_frame = tk.Frame(self.root)
+        self.display_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        try:
-            pil_image = Image.open(filepath).convert('RGB')
-            numpy_image = np.array(pil_image)
-            self.original_image = cv2.cvtColor(numpy_image, cv2.COLOR_RGB2BGR)
-            
-            self.display_image(self.original_image, self.orig_label)
-            self.proc_label.config(image='', text="Преобразованное изображение")
-            self.proc_label.image = None
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось загрузить файл: {e}")
+        # Настройка сетки 1x2
+        self.display_frame.grid_columnconfigure(0, weight=1, uniform="group1")
+        self.display_frame.grid_columnconfigure(1, weight=1, uniform="group1")
+        self.display_frame.grid_rowconfigure(0, weight=1)
 
-    def open_settings_dialog(self):
-        if self.original_image is None:
-            messagebox.showwarning("Внимание", "Сначала загрузите изображение!")
-            return
+        # Рамки для картинок
+        frame_orig = tk.LabelFrame(self.display_frame, text="Оригинал")
+        frame_orig.grid(row=0, column=0, sticky="nsew", padx=5)
+        self.lbl_orig = tk.Label(frame_orig)
+        self.lbl_orig.pack(fill=tk.BOTH, expand=True)
 
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Настройки алгоритма")
-        dialog.geometry("300x220")
-        dialog.transient(self.root)
-        dialog.grab_set()
+        frame_proc = tk.LabelFrame(self.display_frame, text="Результат")
+        frame_proc.grid(row=0, column=1, sticky="nsew", padx=5)
+        self.lbl_proc = tk.Label(frame_proc)
+        self.lbl_proc.pack(fill=tk.BOTH, expand=True)
 
-        main_frame = ttk.Frame(dialog, padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # Кнопки и меню
+        tk.Button(control_frame, text="Открыть изображение", command=self.load_img).pack(fill=tk.X, pady=5)
+        self.btn_save = tk.Button(control_frame, text="Сохранить результат", command=self.save_img, state=tk.DISABLED)
+        self.btn_save.pack(fill=tk.X)
 
-        ttk.Label(main_frame, text="Выберите алгоритм:").pack(anchor=tk.W)
-        algorithm_var = tk.StringVar(value="Медианный фильтр")
-        ttk.Radiobutton(main_frame, text="Медианный фильтр", variable=algorithm_var, value="Медианный фильтр").pack(anchor=tk.W)
-        ttk.Radiobutton(main_frame, text="Дилатация", variable=algorithm_var, value="Дилатация").pack(anchor=tk.W)
+        ttk.Separator(control_frame).pack(fill=tk.X, pady=15)
 
-        kernel_var = tk.IntVar(value=5)
-        kernel_label_text = tk.StringVar()
+        # Выбор режима
+        self.mode_var = tk.StringVar(value="smooth")
+        tk.Radiobutton(control_frame, text="Сглаживание", variable=self.mode_var, value="smooth", command=self.toggle_controls).pack(anchor="w")
+        tk.Radiobutton(control_frame, text="Морфология", variable=self.mode_var, value="morph", command=self.toggle_controls).pack(anchor="w")
 
-        def update_label(value):
-            int_value = int(float(value))
-            kernel_label_text.set(f"Размер ядра: {int_value}")
+        # Настройки сглаживания
+        self.frame_smooth = tk.Frame(control_frame)
+        tk.Label(self.frame_smooth, text="Матрица свертки:").pack(anchor="w", pady=(10, 0))
+        self.combo_kernel = ttk.Combobox(self.frame_smooth, values=list(get_kernels().keys()), state="readonly")
+        self.combo_kernel.current(0)
+        self.combo_kernel.pack(fill=tk.X, pady=5)
 
-        update_label(kernel_var.get()) 
+        # Настройки морфологии
+        self.frame_morph = tk.Frame(control_frame)
+        tk.Label(self.frame_morph, text="Операция:").pack(anchor="w", pady=(10, 0))
+        self.combo_morph = ttk.Combobox(self.frame_morph, values=["Эрозия", "Дилатация", "Размыкание", "Замыкание", "Границы"], state="readonly")
+        self.combo_morph.current(0)
+        self.combo_morph.pack(fill=tk.X, pady=5)
+
+        tk.Label(self.frame_morph, text="Структурный элемент:").pack(anchor="w", pady=(5, 0))
+        self.combo_shape = ttk.Combobox(self.frame_morph, values=["Квадрат", "Крест"], state="readonly")
+        self.combo_shape.current(0)
+        self.combo_shape.pack(fill=tk.X, pady=5)
         
-        ttk.Label(main_frame, textvariable=kernel_label_text).pack(anchor=tk.W, pady=(10,0))
-        
-        ttk.Scale(main_frame, from_=1, to=15, orient=tk.HORIZONTAL, variable=kernel_var, command=update_label, length=280).pack()
+        tk.Label(self.frame_morph, text="Размер (px):").pack(anchor="w")
+        self.spin_size = ttk.Spinbox(self.frame_morph, from_=3, to=21, increment=2)
+        self.spin_size.set(3)
+        self.spin_size.pack(fill=tk.X, pady=5)
 
-        def on_apply():
-            k_size = kernel_var.get()
-            algo = algorithm_var.get()
-            dialog.destroy()
-            self.apply_processing(algo, k_size)
-        
-        ttk.Button(main_frame, text="Применить", command=on_apply).pack(pady=10)
+        self.frame_smooth.pack(fill=tk.X) # Показываем сглаживание по умолчанию
 
-    def apply_processing(self, algorithm, kernel_size):
-        k_size = max(1, kernel_size if kernel_size % 2 != 0 else kernel_size + 1)
+        ttk.Separator(control_frame).pack(fill=tk.X, pady=15)
         
-        if algorithm == "Медианный фильтр":
-            self.processed_image = manual_median_filter(self.original_image, k_size)
+        self.btn_apply = tk.Button(control_frame, text="Применить", command=self.process, bg="#dddddd", state=tk.DISABLED)
+        self.btn_apply.pack(fill=tk.X, pady=5)
         
-        elif algorithm == "Дилатация":
-            gray = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2GRAY)
-            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
-            result = manual_dilate(binary, kernel)
-            self.processed_image = cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
-            
-        self.display_image(self.processed_image, self.proc_label)
-        
-    def display_image(self, cv_image, label):
-        max_w = label.winfo_width()
-        max_h = label.winfo_height()
-        if max_w < 50 or max_h < 50: max_w, max_h = 400, 400
-        
-        h, w = cv_image.shape[:2]
-        scale = min(max_w / w, max_h / h)
-        if scale < 1:
-            resized_img = cv2.resize(cv_image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        tk.Button(control_frame, text="Сброс", command=self.reset).pack(fill=tk.X)
+
+        # Событие изменения размера окна
+        self.display_frame.bind("<Configure>", self.on_resize)
+
+    def toggle_controls(self):
+        if self.mode_var.get() == "smooth":
+            self.frame_morph.pack_forget()
+            self.frame_smooth.pack(fill=tk.X)
         else:
-            resized_img = cv_image
+            self.frame_smooth.pack_forget()
+            self.frame_morph.pack(fill=tk.X)
 
-        img_rgb = cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB)
-        pil_img = Image.fromarray(img_rgb)
-        tk_img = ImageTk.PhotoImage(pil_img)
+    def on_resize(self, event):
+        if not self.img_orig: return
         
-        label.config(image=tk_img, text="")
-        label.image = tk_img
+        # Вычисляем размеры области просмотра
+        w = self.display_frame.winfo_width() // 2 - 20
+        h = self.display_frame.winfo_height() - 40
+        if w < 1 or h < 1: return
 
-if __name__ == '__main__':
+        # Считаем коэффициент масштабирования по оригиналу
+        iw, ih = self.img_orig.size
+        scale = min(w/iw, h/ih)
+        new_size = (int(iw * scale), int(ih * scale))
+
+        self.show_image(self.lbl_orig, self.img_orig, new_size)
+        self.show_image(self.lbl_proc, self.img_proc, new_size)
+
+    def show_image(self, label, img, size):
+        if img:
+            # Используем Lanczos для качественного ресайза
+            resized = img.resize(size, Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(resized)
+            label.config(image=photo)
+            label.image = photo
+        else:
+            label.config(image="")
+            label.image = None
+
+    def load_img(self):
+        path = filedialog.askopenfilename()
+        if path:
+            try:
+                self.img_orig = Image.open(path)
+                self.img_proc = None
+                self.btn_apply.config(state=tk.NORMAL)
+                self.btn_save.config(state=tk.DISABLED)
+                self.on_resize(None)
+            except Exception as e:
+                messagebox.showerror("Ошибка", str(e))
+
+    def save_img(self):
+        if self.img_proc:
+            path = filedialog.asksaveasfilename(defaultextension=".png")
+            if path:
+                self.img_proc.save(path)
+
+    def reset(self):
+        self.img_proc = None
+        self.btn_save.config(state=tk.DISABLED)
+        self.on_resize(None)
+
+    def process(self):
+        if not self.img_orig: return
+        
+        # Переводим в numpy array
+        img_rgb = self.img_orig.convert("RGB")
+        arr = np.array(img_rgb)
+
+        if self.mode_var.get() == "smooth":
+            # Применяем свертку к каждому каналу R, G, B
+            kernel = get_kernels()[self.combo_kernel.get()]
+            channels = []
+            for i in range(3):
+                channels.append(convolve(arr[:,:,i], kernel))
+            res = np.stack(channels, axis=2)
+            self.img_proc = Image.fromarray(res)
+            
+        else:
+            # Для морфологии нужно бинарное изображение
+            # Сначала в оттенки серого, потом порог 128
+            gray = np.array(self.img_orig.convert("L"))
+            binary = np.where(gray > 128, 255, 0).astype(np.uint8)
+            
+            se = get_se(self.combo_shape.get(), int(self.spin_size.get()))
+            op = self.combo_morph.get()
+            
+            if op == "Эрозия":
+                res = morphology(binary, se, 'erosion')
+            elif op == "Дилатация":
+                res = morphology(binary, se, 'dilation')
+            elif op == "Размыкание":
+                tmp = morphology(binary, se, 'erosion')
+                res = morphology(tmp, se, 'dilation')
+            elif op == "Замыкание":
+                tmp = morphology(binary, se, 'dilation')
+                res = morphology(tmp, se, 'erosion')
+            elif op == "Границы":
+                eroded = morphology(binary, se, 'erosion')
+                res = binary - eroded
+                
+            self.img_proc = Image.fromarray(res)
+
+        self.btn_save.config(state=tk.NORMAL)
+        self.on_resize(None)
+
+if __name__ == "__main__":
     root = tk.Tk()
-    app = ImageProcessorApp(root)
-    root.geometry("1000x600")
+    App(root)
     root.mainloop()
