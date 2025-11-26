@@ -9,20 +9,18 @@ class RasterApp:
         self.root.title("Лаб. работа №3: Растровые алгоритмы")
         self.root.geometry("1200x800")
 
-        # Храним масштаб как float для плавности, но используем как int при рисовании
         self.scale = 20.0  
-        
-        # История рисования для восстановления при зуме
-        # Формат: {'func': string_name, 'args': [x1, y1, x2, y2]}
         self.history = [] 
 
         self.setup_ui()
         self.draw_grid()
         
-        # Привязка зума
         self.canvas.bind("<MouseWheel>", self.on_zoom)
-        self.canvas.bind("<Button-4>", self.on_zoom) # Linux скролл вверх
-        self.canvas.bind("<Button-5>", self.on_zoom) # Linux скролл вниз
+        self.canvas.bind("<Button-4>", self.on_zoom) 
+        self.canvas.bind("<Button-5>", self.on_zoom)
+        
+        # !!! Привязываем движение мыши к функции отображения координат
+        self.canvas.bind("<Motion>", self.on_mouse_move)
 
     def setup_ui(self):
         panel = tk.Frame(self.root, padx=10, pady=10, width=250)
@@ -76,25 +74,40 @@ class RasterApp:
         tk.Label(panel, text="Масштаб (скролл):", font=("Arial", 10, "bold")).pack(pady=5)
         self.lbl_scale = tk.Label(panel, text=f"Scale: {int(self.scale)}")
         self.lbl_scale.pack()
+        
+        # !!! Метка для вывода текущих координат мыши
+        self.lbl_cursor = tk.Label(panel, text="X: 0, Y: 0", font=("Arial", 12), fg="blue")
+        self.lbl_cursor.pack(pady=10)
 
         tk.Label(panel, text="Трассировка:", font=("Arial", 10, "bold")).pack(pady=5)
-        self.log_area = tk.Text(panel, height=15, width=32, font=("Consolas", 8))
+        self.log_area = tk.Text(panel, height=10, width=32, font=("Consolas", 8))
         self.log_area.pack()
 
         self.canvas = tk.Canvas(self.root, bg="white")
         self.canvas.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         self.canvas.bind("<Configure>", lambda e: self.redraw())
 
+    # !!! Функция отслеживания мыши
+    def on_mouse_move(self, event):
+        w = self.canvas.winfo_width()
+        h = self.canvas.winfo_height()
+        cx, cy = w // 2, h // 2
+        s = int(self.scale)
+
+        # Перевод экранных координат в математические
+        # math.floor нужен, чтобы корректно округлять отрицательные числа (например -0.5 -> -1)
+        grid_x = math.floor((event.x - cx) / s)
+        grid_y = math.floor((cy - event.y) / s)
+
+        self.lbl_cursor.config(text=f"X: {grid_x}, Y: {grid_y}")
+
     def on_zoom(self, event):
-        # Мультипликативное масштабирование (плавное)
-        # Windows: event.delta, Linux: event.num
         factor = 1.1
         if event.num == 5 or event.delta < 0:
             self.scale /= factor
         else:
             self.scale *= factor
         
-        # Ограничиваем разумными пределами
         if self.scale < 2.0: self.scale = 2.0
         if self.scale > 200.0: self.scale = 200.0
         
@@ -105,7 +118,6 @@ class RasterApp:
         self.canvas.delete("all")
         self.draw_grid()
         
-        # Перерисовываем историю (silent=True чтобы не спамить в лог при зуме)
         for item in self.history:
             func_name = item['func']
             args = item['args']
@@ -138,7 +150,6 @@ class RasterApp:
         self.canvas.create_text(w-15, cy+15, text="X")
         self.canvas.create_text(cx+15, 15, text="Y")
 
-        # Подписи (адаптивный шаг)
         step_nums = 1
         if s < 30: step_nums = 5
         if s < 10: step_nums = 10
@@ -187,8 +198,6 @@ class RasterApp:
             return
 
         mode = self.algo_var.get()
-        
-        # Сохраняем в историю
         self.history.append({'func': mode, 'args': [x1, y1, x2, y2]})
         
         self.log(f"--- {mode} ---")
@@ -205,23 +214,20 @@ class RasterApp:
         self.log(f"Время: {dt:.4f} мс")
         self.log("-" * 10)
 
-    # 1. Пошаговый
+    # Алгоритмы без изменений
     def step_algo(self, x1, y1, x2, y2, silent=False):
         if x1 == x2 and y1 == y2:
             self.plot(x1, y1)
             return
         dx, dy = x2 - x1, y2 - y1
-        
         if dx == 0:
             step = 1 if y2 > y1 else -1
             for y in range(y1, y2 + step, step):
                 self.plot(x1, y, "blue")
             return
-
         k = dy / dx
         b = y1 - k * x1
         if not silent: self.log(f"k={k:.2f}, b={b:.2f}")
-        
         if abs(dx) >= abs(dy):
             step = 1 if x2 > x1 else -1
             for x in range(x1, x2 + step, step):
@@ -234,7 +240,6 @@ class RasterApp:
                 x = (y - b) / k
                 self.plot(round(x), y, "blue")
 
-    # 2. ЦДА
     def dda_algo(self, x1, y1, x2, y2, silent=False):
         dx, dy = x2 - x1, y2 - y1
         L = max(abs(dx), abs(dy))
@@ -249,38 +254,30 @@ class RasterApp:
             cx += sx
             cy += sy
 
-    # 3. Брезенхем (линия)
     def bres_line(self, x1, y1, x2, y2, silent=False):
         dx, dy = abs(x2 - x1), abs(y2 - y1)
         sx = 1 if x1 < x2 else -1
         sy = 1 if y1 < y2 else -1
         steep = dy > dx
-        
         if steep:
             x1, y1 = y1, x1
             x2, y2 = y2, x2
             dx, dy = abs(x2 - x1), abs(y2 - y1)
             sx = 1 if x1 < x2 else -1
             sy = 1 if y1 < y2 else -1
-            
         err = 2 * dy - dx
         x, y = x1, y1
-        
         if not silent: self.log(f"Init err={err}")
-        
         for i in range(dx + 1):
             if steep: self.plot(y, x, "green")
             else: self.plot(x, y, "green")
-            
             if not silent and i < 3: self.log(f"e={err}")
-            
             if err >= 0:
                 y += sy
                 err -= 2 * dx
             x += sx
             err += 2 * dy
 
-    # 4. Брезенхем (окружность)
     def bres_circle(self, xc, yc, r, silent=False):
         x = 0
         y = r
@@ -301,17 +298,14 @@ class RasterApp:
         for dx, dy in pts:
             self.plot(xc + dx, yc + dy, "purple")
 
-    # 5. Кастла-Питвея
     def castle_algo(self, x1, y1, x2, y2, silent=False):
         dx, dy = abs(x2 - x1), abs(y2 - y1)
         sx = 1 if x1 < x2 else -1
         sy = 1 if y1 < y2 else -1
         swap = dy > dx
         if swap: dx, dy = dy, dx
-        
         a, b = dx, dy
         m1, m2 = ['s'], ['d']
-        
         if b == 0:
             ops = ['s'] * a
         else:
@@ -326,7 +320,6 @@ class RasterApp:
                     cy -= cx
                     m1 = m2 + m1
             ops = (m2 + m1) * cx
-            
         curr_x, curr_y = x1, y1
         self.plot(curr_x, curr_y, "orange")
         for op in ops:
@@ -338,13 +331,11 @@ class RasterApp:
                 curr_y += sy
             self.plot(curr_x, curr_y, "orange")
 
-    # 6. Ву
     def wu_algo(self, x1, y1, x2, y2, silent=False):
         def ipart(x): return int(x)
         def round_f(x): return ipart(x + 0.5)
         def fpart(x): return x - ipart(x)
         def rfpart(x): return 1 - fpart(x)
-
         dx, dy = x2 - x1, y2 - y1
         steep = abs(dy) > abs(dx)
         if steep:
@@ -354,36 +345,30 @@ class RasterApp:
         if x2 < x1:
             x1, x2 = x2, x1
             y1, y2 = y2, y1
-            
         grad = dy / dx if dx != 0 else 1.0
-        
         xend = round_f(x1)
         yend = y1 + grad * (xend - x1)
         xgap = rfpart(x1 + 0.5)
         xpxl1 = xend
         ypxl1 = ipart(yend)
-
         if steep:
             self.plot(ypxl1, xpxl1, alpha=rfpart(yend)*xgap)
             self.plot(ypxl1+1, xpxl1, alpha=fpart(yend)*xgap)
         else:
             self.plot(xpxl1, ypxl1, alpha=rfpart(yend)*xgap)
             self.plot(xpxl1, ypxl1+1, alpha=fpart(yend)*xgap)
-
         intery = yend + grad
         xend = round_f(x2)
         yend = y2 + grad * (xend - x2)
         xgap = rfpart(x2 + 0.5)
         xpxl2 = xend
         ypxl2 = ipart(yend)
-        
         if steep:
             self.plot(ypxl2, xpxl2, alpha=rfpart(yend)*xgap)
             self.plot(ypxl2+1, xpxl2, alpha=fpart(yend)*xgap)
         else:
             self.plot(xpxl2, ypxl2, alpha=rfpart(yend)*xgap)
             self.plot(xpxl2, ypxl2+1, alpha=fpart(yend)*xgap)
-            
         for x in range(xpxl1 + 1, xpxl2):
             if steep:
                 self.plot(ipart(intery), x, alpha=rfpart(intery))
